@@ -11,71 +11,72 @@ import (
 	"github.com/tamnd/openfoodfacts-cli/openfoodfacts"
 )
 
+// --- fake JSON responses ---
+
 const fakeProductJSON = `{
   "status": 1,
-  "code": "737628064502",
   "product": {
-    "code": "737628064502",
-    "product_name": "Organic Whole Milk",
-    "brands": "Horizon Organic",
-    "categories": "Milks, Cow milks",
-    "image_url": "https://images.openfoodfacts.org/images/products/073/762/806/4502/front.jpg",
-    "nutriscore_grade": "b",
-    "nova_group": 1,
+    "product_name": "Nutella",
+    "brands": "Ferrero",
+    "categories": "Spreads",
+    "quantity": "400 g",
+    "nutrition_grades": "e",
+    "ecoscore_grade": "d",
     "nutriments": {
-      "energy-kcal_100g": 61,
-      "fat_100g": 3.25,
-      "carbohydrates_100g": 4.8,
-      "proteins_100g": 3.15,
-      "salt_100g": 0.1,
-      "sugars_100g": 4.8
+      "energy-kcal_100g": 539,
+      "fat_100g": 30.9,
+      "saturated-fat_100g": 10.6,
+      "carbohydrates_100g": 57.5,
+      "sugars_100g": 56.3,
+      "proteins_100g": 6.3,
+      "salt_100g": 0.107,
+      "fiber_100g": 0
     }
   }
 }`
 
-const fakeProductNotFoundJSON = `{"status": 0, "code": "0000000000000", "product": {}}`
+const fakeProductNotFoundJSON = `{"status": 0, "product": {}}`
 
 const fakeSearchJSON = `{
-  "count": 124867,
+  "count": 15234,
+  "page": 1,
+  "page_size": 3,
   "products": [
     {
       "code": "3046920022651",
       "product_name": "Extra fine dark chocolate",
-      "brands": "Lindt & Sprungli",
-      "categories": "Chocolates",
-      "image_url": "https://images.openfoodfacts.org/images/products/1.jpg",
-      "nutriscore_grade": "d",
-      "nova_group": 4,
-      "nutriments": {
-        "energy-kcal_100g": 546,
-        "fat_100g": 36,
-        "carbohydrates_100g": 46,
-        "proteins_100g": 5,
-        "salt_100g": 0.01,
-        "sugars_100g": 44
-      }
+      "brands": "Lindt",
+      "nutrition_grades": "d",
+      "ecoscore_grade": "c"
     },
     {
       "code": "3046920028950",
       "product_name": "Excellence 70% cacao",
       "brands": "Lindt",
-      "categories": "Dark chocolates",
-      "image_url": "",
-      "nutriscore_grade": "c",
-      "nova_group": 3,
-      "nutriments": {
-        "energy-kcal_100g": 580,
-        "fat_100g": 42,
-        "carbohydrates_100g": 35,
-        "proteins_100g": 8,
-        "salt_100g": 0.005,
-        "sugars_100g": 27
-      }
+      "nutrition_grades": "c",
+      "ecoscore_grade": "b"
     }
-  ],
-  "skip": 0,
-  "page_size": 5,
-  "page": 1
+  ]
+}`
+
+const fakeCategoryJSON = `{
+  "count": 12345,
+  "products": [
+    {
+      "code": "3017624010701",
+      "product_name": "Nutella",
+      "brands": "Ferrero",
+      "nutrition_grades": "e",
+      "ecoscore_grade": "d"
+    },
+    {
+      "code": "3046920022651",
+      "product_name": "Extra fine dark chocolate",
+      "brands": "Lindt",
+      "nutrition_grades": "d",
+      "ecoscore_grade": "c"
+    }
+  ]
 }`
 
 func newTestClient(ts *httptest.Server) *openfoodfacts.Client {
@@ -85,6 +86,8 @@ func newTestClient(ts *httptest.Server) *openfoodfacts.Client {
 	return openfoodfacts.NewClient(cfg)
 }
 
+// --- product tests ---
+
 func TestGetProductParsesFields(t *testing.T) {
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		_, _ = fmt.Fprint(w, fakeProductJSON)
@@ -92,27 +95,27 @@ func TestGetProductParsesFields(t *testing.T) {
 	defer ts.Close()
 
 	c := newTestClient(ts)
-	p, err := c.GetProduct(context.Background(), "737628064502")
+	p, err := c.GetProduct(context.Background(), "3017624010701")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if p.Barcode != "737628064502" {
-		t.Errorf("Barcode = %q, want 737628064502", p.Barcode)
+	if p.Barcode != "3017624010701" {
+		t.Errorf("Barcode = %q, want 3017624010701", p.Barcode)
 	}
-	if p.Name != "Organic Whole Milk" {
-		t.Errorf("Name = %q, want Organic Whole Milk", p.Name)
+	if p.Name != "Nutella" {
+		t.Errorf("Name = %q, want Nutella", p.Name)
 	}
-	if p.Brands != "Horizon Organic" {
-		t.Errorf("Brands = %q, want Horizon Organic", p.Brands)
+	if p.Brands != "Ferrero" {
+		t.Errorf("Brands = %q, want Ferrero", p.Brands)
 	}
-	if p.NutriScore != "b" {
-		t.Errorf("NutriScore = %q, want b", p.NutriScore)
+	if p.Quantity != "400 g" {
+		t.Errorf("Quantity = %q, want 400 g", p.Quantity)
 	}
-	if p.NovaGroup != 1 {
-		t.Errorf("NovaGroup = %d, want 1", p.NovaGroup)
+	if p.NutritionGrade != "e" {
+		t.Errorf("NutritionGrade = %q, want e", p.NutritionGrade)
 	}
-	if p.ImageURL == "" {
-		t.Error("ImageURL is empty")
+	if p.EcoScore != "d" {
+		t.Errorf("EcoScore = %q, want d", p.EcoScore)
 	}
 }
 
@@ -123,28 +126,24 @@ func TestGetProductNutriments(t *testing.T) {
 	defer ts.Close()
 
 	c := newTestClient(ts)
-	p, err := c.GetProduct(context.Background(), "737628064502")
+	p, err := c.GetProduct(context.Background(), "3017624010701")
 	if err != nil {
 		t.Fatal(err)
 	}
-	n := p.Nutriments
-	if n.EnergyKcal100g != 61 {
-		t.Errorf("EnergyKcal100g = %v, want 61", n.EnergyKcal100g)
+	if p.EnergyKcal != "539.0" {
+		t.Errorf("EnergyKcal = %q, want 539.0", p.EnergyKcal)
 	}
-	if n.Fat100g != 3.25 {
-		t.Errorf("Fat100g = %v, want 3.25", n.Fat100g)
+	if p.Fat != "30.9" {
+		t.Errorf("Fat = %q, want 30.9", p.Fat)
 	}
-	if n.Carbohydrates100g != 4.8 {
-		t.Errorf("Carbohydrates100g = %v, want 4.8", n.Carbohydrates100g)
+	if p.Sugars != "56.3" {
+		t.Errorf("Sugars = %q, want 56.3", p.Sugars)
 	}
-	if n.Proteins100g != 3.15 {
-		t.Errorf("Proteins100g = %v, want 3.15", n.Proteins100g)
+	if p.Proteins != "6.3" {
+		t.Errorf("Proteins = %q, want 6.3", p.Proteins)
 	}
-	if n.Salt100g != 0.1 {
-		t.Errorf("Salt100g = %v, want 0.1", n.Salt100g)
-	}
-	if n.Sugars100g != 4.8 {
-		t.Errorf("Sugars100g = %v, want 4.8", n.Sugars100g)
+	if p.Salt != "0.1" {
+		t.Errorf("Salt = %q, want 0.1", p.Salt)
 	}
 }
 
@@ -173,7 +172,7 @@ func TestGetProductSendsUserAgent(t *testing.T) {
 	defer ts.Close()
 
 	c := newTestClient(ts)
-	_, err := c.GetProduct(context.Background(), "737628064502")
+	_, err := c.GetProduct(context.Background(), "3017624010701")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -191,14 +190,16 @@ func TestGetProductUsesV2Endpoint(t *testing.T) {
 	defer ts.Close()
 
 	c := newTestClient(ts)
-	_, err := c.GetProduct(context.Background(), "737628064502")
+	_, err := c.GetProduct(context.Background(), "3017624010701")
 	if err != nil {
 		t.Fatal(err)
 	}
 	if !strings.Contains(gotPath, "/api/v2/product/") {
-		t.Errorf("expected /api/v2/product/ endpoint, got path %q", gotPath)
+		t.Errorf("expected /api/v2/product/ in path, got %q", gotPath)
 	}
 }
+
+// --- search tests ---
 
 func TestSearchParsesItems(t *testing.T) {
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -207,31 +208,25 @@ func TestSearchParsesItems(t *testing.T) {
 	defer ts.Close()
 
 	c := newTestClient(ts)
-	products, err := c.Search(context.Background(), "chocolate", 5)
+	results, err := c.Search(context.Background(), "chocolate", 3, 1)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(products) != 2 {
-		t.Fatalf("len(products) = %d, want 2", len(products))
+	if len(results) != 2 {
+		t.Fatalf("len(results) = %d, want 2", len(results))
 	}
-
-	p0 := products[0]
-	if p0.Name != "Extra fine dark chocolate" {
-		t.Errorf("products[0].Name = %q, want Extra fine dark chocolate", p0.Name)
+	r0 := results[0]
+	if r0.Name != "Extra fine dark chocolate" {
+		t.Errorf("results[0].Name = %q, want Extra fine dark chocolate", r0.Name)
 	}
-	if p0.Brands == "" {
-		t.Error("products[0].Brands is empty")
+	if r0.Barcode != "3046920022651" {
+		t.Errorf("results[0].Barcode = %q, want 3046920022651", r0.Barcode)
 	}
-	if p0.NutriScore != "d" {
-		t.Errorf("products[0].NutriScore = %q, want d", p0.NutriScore)
+	if r0.NutritionGrade != "d" {
+		t.Errorf("results[0].NutritionGrade = %q, want d", r0.NutritionGrade)
 	}
-	if p0.NovaGroup != 4 {
-		t.Errorf("products[0].NovaGroup = %d, want 4", p0.NovaGroup)
-	}
-
-	p1 := products[1]
-	if p1.Name != "Excellence 70% cacao" {
-		t.Errorf("products[1].Name = %q, want Excellence 70%% cacao", p1.Name)
+	if r0.EcoScore != "c" {
+		t.Errorf("results[0].EcoScore = %q, want c", r0.EcoScore)
 	}
 }
 
@@ -244,12 +239,12 @@ func TestSearchUsesSearchPl(t *testing.T) {
 	defer ts.Close()
 
 	c := newTestClient(ts)
-	_, err := c.Search(context.Background(), "chocolate", 5)
+	_, err := c.Search(context.Background(), "chocolate", 3, 1)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if !strings.Contains(gotPath, "search.pl") {
-		t.Errorf("expected search.pl endpoint, got path %q", gotPath)
+		t.Errorf("expected search.pl in path, got %q", gotPath)
 	}
 }
 
@@ -262,12 +257,12 @@ func TestSearchDefaultsLimit(t *testing.T) {
 	defer ts.Close()
 
 	c := newTestClient(ts)
-	_, err := c.Search(context.Background(), "milk", 0) // limit=0 → default 10
+	_, err := c.Search(context.Background(), "milk", 0, 0)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(gotQuery, "page_size=10") {
-		t.Errorf("expected page_size=10 in query, got %q", gotQuery)
+	if !strings.Contains(gotQuery, "page_size=20") {
+		t.Errorf("expected page_size=20 in query, got %q", gotQuery)
 	}
 }
 
@@ -289,11 +284,58 @@ func TestSearchRetriesOn503(t *testing.T) {
 	cfg.Retries = 3
 	c := openfoodfacts.NewClient(cfg)
 
-	_, err := c.Search(context.Background(), "chocolate", 5)
+	_, err := c.Search(context.Background(), "chocolate", 3, 1)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if hits != 3 {
 		t.Errorf("server saw %d hits, want 3", hits)
+	}
+}
+
+// --- category tests ---
+
+func TestCategoryParsesItems(t *testing.T) {
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = fmt.Fprint(w, fakeCategoryJSON)
+	}))
+	defer ts.Close()
+
+	c := newTestClient(ts)
+	results, err := c.Category(context.Background(), "chocolates", 5)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(results) != 2 {
+		t.Fatalf("len(results) = %d, want 2", len(results))
+	}
+	r0 := results[0]
+	if r0.Name != "Nutella" {
+		t.Errorf("results[0].Name = %q, want Nutella", r0.Name)
+	}
+	if r0.Barcode != "3017624010701" {
+		t.Errorf("results[0].Barcode = %q, want 3017624010701", r0.Barcode)
+	}
+}
+
+func TestCategoryUsesCorrectPath(t *testing.T) {
+	var gotPath, gotQuery string
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotPath = r.URL.Path
+		gotQuery = r.URL.RawQuery
+		_, _ = fmt.Fprint(w, fakeCategoryJSON)
+	}))
+	defer ts.Close()
+
+	c := newTestClient(ts)
+	_, err := c.Category(context.Background(), "chocolates", 5)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(gotPath, "search.pl") {
+		t.Errorf("expected search.pl in path, got %q", gotPath)
+	}
+	if !strings.Contains(gotQuery, "chocolates") {
+		t.Errorf("expected category name in query, got %q", gotQuery)
 	}
 }

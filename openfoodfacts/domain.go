@@ -59,6 +59,15 @@ func (Domain) Register(app *kit.App) {
 		Summary: "Search for food products by name",
 		Args:    []kit.Arg{{Name: "query", Help: "search query"}},
 	}, searchOp)
+
+	// category: list products in a taxonomy category
+	kit.Handle(app, kit.OpMeta{
+		Name:    "category",
+		Group:   "read",
+		List:    true,
+		Summary: "List food products in a category (e.g. chocolates, biscuits)",
+		Args:    []kit.Arg{{Name: "category", Help: "Open Food Facts taxonomy category slug"}},
+	}, categoryOp)
 }
 
 // newClient builds the client from host-resolved config.
@@ -88,8 +97,15 @@ type productInput struct {
 
 type searchInput struct {
 	Query  string  `kit:"arg" help:"search query"`
-	Limit  int     `kit:"flag,inherit" help:"max results" default:"10"`
+	Limit  int     `kit:"flag,inherit" help:"max results" default:"20"`
+	Page   int     `kit:"flag,inherit" help:"page number" default:"1"`
 	Client *Client `kit:"inject"`
+}
+
+type categoryInput struct {
+	Category string  `kit:"arg" help:"Open Food Facts category slug (e.g. chocolates)"`
+	Limit    int     `kit:"flag,inherit" help:"max results" default:"20"`
+	Client   *Client `kit:"inject"`
 }
 
 // --- handlers ---
@@ -102,17 +118,38 @@ func productOp(ctx context.Context, in productInput, emit func(Product) error) e
 	return emit(*p)
 }
 
-func searchOp(ctx context.Context, in searchInput, emit func(Product) error) error {
+func searchOp(ctx context.Context, in searchInput, emit func(SearchResult) error) error {
 	limit := in.Limit
 	if limit <= 0 {
-		limit = 10
+		limit = 20
 	}
-	products, err := in.Client.Search(ctx, in.Query, limit)
+	page := in.Page
+	if page <= 0 {
+		page = 1
+	}
+	results, err := in.Client.Search(ctx, in.Query, limit, page)
 	if err != nil {
 		return err
 	}
-	for _, p := range products {
-		if err := emit(p); err != nil {
+	for _, r := range results {
+		if err := emit(r); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func categoryOp(ctx context.Context, in categoryInput, emit func(SearchResult) error) error {
+	limit := in.Limit
+	if limit <= 0 {
+		limit = 20
+	}
+	results, err := in.Client.Category(ctx, in.Category, limit)
+	if err != nil {
+		return err
+	}
+	for _, r := range results {
+		if err := emit(r); err != nil {
 			return err
 		}
 	}
