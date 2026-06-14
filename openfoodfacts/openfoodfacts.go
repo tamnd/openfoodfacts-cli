@@ -33,9 +33,9 @@ type Config struct {
 func DefaultConfig() Config {
 	return Config{
 		BaseURL:   "https://world.openfoodfacts.org",
-		UserAgent: "openfoodfacts-cli/0.1.0 (github.com/tamnd/openfoodfacts-cli)",
+		UserAgent: "openfoodfacts-cli/0.1 (tamnd87@gmail.com)",
 		Rate:      300 * time.Millisecond,
-		Timeout:   30 * time.Second,
+		Timeout:   20 * time.Second,
 		Retries:   3,
 	}
 }
@@ -56,11 +56,10 @@ func NewClient(cfg Config) *Client {
 	}
 }
 
-// wire types for JSON decode only
+// wire types — used only for JSON decode
 
 type productResponse struct {
 	Status  int         `json:"status"` // 1=found, 0=not found
-	Code    string      `json:"code"`
 	Product wireProduct `json:"product"`
 }
 
@@ -70,31 +69,45 @@ type searchResponse struct {
 }
 
 type wireProduct struct {
-	Code            string         `json:"code"`
-	ProductName     string         `json:"product_name"`
-	Brands          string         `json:"brands"`
-	Categories      string         `json:"categories"`
-	ImageURL        string         `json:"image_url"`
-	NutriscoreGrade string         `json:"nutriscore_grade"`
-	NovaGroup       int            `json:"nova_group"`
-	Nutriments      wireNutriments `json:"nutriments"`
+	Code            string                     `json:"code"`
+	ProductName     string                     `json:"product_name"`
+	Brands          string                     `json:"brands"`
+	Categories      string                     `json:"categories"`
+	Quantity        string                     `json:"quantity"`
+	NutritionGrades string                     `json:"nutrition_grades"`
+	EcoscoreGrade   string                     `json:"ecoscore_grade"`
+	Nutriments      map[string]json.RawMessage `json:"nutriments"`
 }
 
-type wireNutriments struct {
-	EnergyKcal100g    float64 `json:"energy-kcal_100g"`
-	Fat100g           float64 `json:"fat_100g"`
-	Carbohydrates100g float64 `json:"carbohydrates_100g"`
-	Proteins100g      float64 `json:"proteins_100g"`
-	Salt100g          float64 `json:"salt_100g"`
-	Sugars100g        float64 `json:"sugars_100g"`
+func nutriFloat(m map[string]json.RawMessage, key string) float64 {
+	if m == nil {
+		return 0
+	}
+	raw, ok := m[key]
+	if !ok {
+		return 0
+	}
+	var v float64
+	if err := json.Unmarshal(raw, &v); err != nil {
+		return 0
+	}
+	return v
+}
+
+func fmtFloat(v float64) string {
+	if v == 0 {
+		return ""
+	}
+	return fmt.Sprintf("%.1f", v)
 }
 
 // GetProduct fetches the product with the given barcode.
 // Returns an error if the product is not found (status == 0).
 func (c *Client) GetProduct(ctx context.Context, barcode string) (*Product, error) {
+	fields := "product_name,brands,categories,quantity,nutrition_grades,ecoscore_grade,nutriments"
 	u := fmt.Sprintf(
-		"%s/api/v2/product/%s.json",
-		c.cfg.BaseURL, neturl.PathEscape(barcode),
+		"%s/api/v2/product/%s.json?fields=%s",
+		c.cfg.BaseURL, neturl.PathEscape(barcode), fields,
 	)
 	body, err := c.get(ctx, u)
 	if err != nil {
@@ -104,24 +117,27 @@ func (c *Client) GetProduct(ctx context.Context, barcode string) (*Product, erro
 	if err := json.Unmarshal(body, &resp); err != nil {
 		return nil, fmt.Errorf("decode product: %w", err)
 	}
-	if resp.Status == 0 {
+	if resp.Status != 1 {
 		return nil, fmt.Errorf("product not found: %s", barcode)
 	}
-	p := toProduct(resp.Product)
+	p := toProduct(barcode, resp.Product)
 	return &p, nil
 }
 
 // Search fetches products matching the given query string.
-// limit defaults to 10 if <= 0.
-func (c *Client) Search(ctx context.Context, query string, limit int) ([]Product, error) {
+func (c *Client) Search(ctx context.Context, query string, limit, page int) ([]SearchResult, error) {
 	n := limit
 	if n <= 0 {
-		n = 10
+		n = 20
 	}
-	fields := "product_name,brands,categories,code,image_url,nutriscore_grade,nova_group,nutriments"
+	pg := page
+	if pg <= 0 {
+		pg = 1
+	}
+	fields := "product_name,brands,nutrition_grades,ecoscore_grade,code"
 	u := fmt.Sprintf(
-		"%s/cgi/search.pl?search_terms=%s&action=process&json=1&page_size=%d&fields=%s",
-		c.cfg.BaseURL, neturl.QueryEscape(query), n, fields,
+		"%s/cgi/search.pl?search_terms=%s&search_simple=1&action=process&json=1&page_size=%d&page=%d&fields=%s",
+		c.cfg.BaseURL, neturl.QueryEscape(query), n, pg, fields,
 	)
 	body, err := c.get(ctx, u)
 	if err != nil {
@@ -131,31 +147,66 @@ func (c *Client) Search(ctx context.Context, query string, limit int) ([]Product
 	if err := json.Unmarshal(body, &resp); err != nil {
 		return nil, fmt.Errorf("decode search: %w", err)
 	}
-	products := make([]Product, 0, len(resp.Products))
+	results := make([]SearchResult, 0, len(resp.Products))
 	for _, r := range resp.Products {
-		products = append(products, toProduct(r))
+		results = append(results, toSearchResult(r))
 	}
-	return products, nil
+	return results, nil
 }
 
-func toProduct(r wireProduct) Product {
+// Category lists products in the given Open Food Facts taxonomy category.
+// It uses the search CGI with a category tag filter, which is more reliable
+// than the facet browsing endpoint that is sometimes unavailable.
+func (c *Client) Category(ctx context.Context, category string, limit int) ([]SearchResult, error) {
+	n := limit
+	if n <= 0 {
+		n = 20
+	}
+	fields := "product_name,brands,nutrition_grades,ecoscore_grade,code"
+	u := fmt.Sprintf(
+		"%s/cgi/search.pl?tagtype_0=categories&tag_contains_0=contains&tag_0=%s&action=process&json=1&page_size=%d&fields=%s",
+		c.cfg.BaseURL, neturl.QueryEscape(category), n, fields,
+	)
+	body, err := c.get(ctx, u)
+	if err != nil {
+		return nil, err
+	}
+	var resp searchResponse
+	if err := json.Unmarshal(body, &resp); err != nil {
+		return nil, fmt.Errorf("decode category: %w", err)
+	}
+	results := make([]SearchResult, 0, len(resp.Products))
+	for _, r := range resp.Products {
+		results = append(results, toSearchResult(r))
+	}
+	return results, nil
+}
+
+func toProduct(barcode string, r wireProduct) Product {
 	n := r.Nutriments
 	return Product{
-		Barcode:    r.Code,
-		Name:       r.ProductName,
-		Brands:     r.Brands,
-		Categories: r.Categories,
-		ImageURL:   r.ImageURL,
-		NutriScore: r.NutriscoreGrade,
-		NovaGroup:  r.NovaGroup,
-		Nutriments: Nutriments{
-			EnergyKcal100g:    n.EnergyKcal100g,
-			Fat100g:           n.Fat100g,
-			Carbohydrates100g: n.Carbohydrates100g,
-			Proteins100g:      n.Proteins100g,
-			Salt100g:          n.Salt100g,
-			Sugars100g:        n.Sugars100g,
-		},
+		Barcode:        barcode,
+		Name:           r.ProductName,
+		Brands:         r.Brands,
+		Categories:     r.Categories,
+		Quantity:       r.Quantity,
+		NutritionGrade: r.NutritionGrades,
+		EcoScore:       r.EcoscoreGrade,
+		EnergyKcal:     fmtFloat(nutriFloat(n, "energy-kcal_100g")),
+		Fat:            fmtFloat(nutriFloat(n, "fat_100g")),
+		Sugars:         fmtFloat(nutriFloat(n, "sugars_100g")),
+		Proteins:       fmtFloat(nutriFloat(n, "proteins_100g")),
+		Salt:           fmtFloat(nutriFloat(n, "salt_100g")),
+	}
+}
+
+func toSearchResult(r wireProduct) SearchResult {
+	return SearchResult{
+		Barcode:        r.Code,
+		Name:           r.ProductName,
+		Brands:         r.Brands,
+		NutritionGrade: r.NutritionGrades,
+		EcoScore:       r.EcoscoreGrade,
 	}
 }
 
@@ -216,5 +267,9 @@ func (c *Client) pace() {
 }
 
 func backoff(attempt int) time.Duration {
-	return min(time.Duration(attempt)*500*time.Millisecond, 5*time.Second)
+	d := time.Duration(attempt) * 500 * time.Millisecond
+	if d > 5*time.Second {
+		return 5 * time.Second
+	}
+	return d
 }

@@ -1,23 +1,28 @@
 package openfoodfacts
 
-// Nutriments holds per-100g nutritional values for a food product.
-type Nutriments struct {
-	EnergyKcal100g    float64 `json:"energy-kcal_100g"`
-	Fat100g           float64 `json:"fat_100g"`
-	Carbohydrates100g float64 `json:"carbohydrates_100g"`
-	Proteins100g      float64 `json:"proteins_100g"`
-	Salt100g          float64 `json:"salt_100g"`
-	Sugars100g        float64 `json:"sugars_100g"`
+// Product is the output record for a single food product lookup by barcode.
+// Nutriment values are formatted as strings with one decimal place
+// so they render consistently in table and CSV output.
+type Product struct {
+	Barcode        string `kit:"id" json:"barcode"`
+	Name           string `json:"name"`
+	Brands         string `json:"brands"`
+	Categories     string `json:"categories"`
+	Quantity       string `json:"quantity"`
+	NutritionGrade string `json:"nutrition_grade"`
+	EcoScore       string `json:"eco_score"`
+	EnergyKcal     string `json:"energy_kcal"`
+	Fat            string `json:"fat_g"`
+	Sugars         string `json:"sugars_g"`
+	Proteins       string `json:"proteins_g"`
+	Salt           string `json:"salt_g"`
 }
 
-// Product is the normalized output record for a food product.
-type Product struct {
-	Barcode    string     `kit:"id" json:"code"`
-	Name       string     `json:"product_name"`
-	Brands     string     `json:"brands"`
-	Categories string     `json:"categories"`
-	ImageURL   string     `json:"image_url"`
-	NutriScore string     `json:"nutriscore_grade"`
-	NovaGroup  int        `json:"nova_group"`
-	Nutriments Nutriments `json:"nutriments"`
+// SearchResult is the output record for search and category listings.
+type SearchResult struct {
+	Barcode        string `kit:"id" json:"barcode"`
+	Name           string `json:"name"`
+	Brands         string `json:"brands"`
+	NutritionGrade string `json:"nutrition_grade"`
+	EcoScore       string `json:"eco_score"`
 }
