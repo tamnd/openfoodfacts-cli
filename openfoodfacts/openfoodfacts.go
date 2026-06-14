@@ -1,62 +1,189 @@
 // Package openfoodfacts is the library behind the openfoodfacts command line:
-// the HTTP client, request shaping, and the typed data models for openfoodfacts.
+// the HTTP client, request shaping, and the typed data models for the Open
+// Food Facts API (world.openfoodfacts.org).
 //
-// The Client here is the spine every command shares. It sets a real
-// User-Agent, paces requests so a busy session stays polite, and retries the
-// transient failures (429 and 5xx) that any public site throws under load.
-// Build your endpoint calls and JSON decoding on top of it.
+// No authentication is required. The client sets a descriptive User-Agent and
+// paces requests at 200ms minimum to be polite to the free community service.
 package openfoodfacts
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
-	"regexp"
-	"strings"
+	neturl "net/url"
+	"sync"
 	"time"
 )
 
-// DefaultUserAgent identifies the client to openfoodfacts. A real, honest
-// User-Agent is both polite and the thing most likely to keep you unblocked.
-const DefaultUserAgent = "openfoodfacts/dev (+https://github.com/tamnd/openfoodfacts-cli)"
+// Host is the site this client talks to.
+const Host = "world.openfoodfacts.org"
 
-// Host is the site this client talks to, and the host the URI driver in
-// domain.go claims. The scaffold points it at openfoodfacts.com; change it once you
-// know the real endpoints you want to read.
-const Host = "openfoodfacts.com"
-
-// BaseURL is the root every request is built from.
-const BaseURL = "https://" + Host
-
-// Client talks to openfoodfacts over HTTP.
-type Client struct {
-	HTTP      *http.Client
+// Config holds all tunable parameters for the Client.
+type Config struct {
+	BaseURL   string
 	UserAgent string
-	// Rate is the minimum gap between requests. Zero means no pacing.
-	Rate    time.Duration
-	Retries int
-
-	last time.Time
+	Rate      time.Duration
+	Timeout   time.Duration
+	Retries   int
 }
 
-// NewClient returns a Client with sensible defaults: a 30s timeout, a 200ms
-// minimum gap between requests, and five retries on transient errors.
-func NewClient() *Client {
-	return &Client{
-		HTTP:      &http.Client{Timeout: 30 * time.Second},
-		UserAgent: DefaultUserAgent,
+// DefaultConfig returns a Config with sensible defaults.
+func DefaultConfig() Config {
+	return Config{
+		BaseURL:   "https://world.openfoodfacts.org",
+		UserAgent: "openfoodfacts-cli/0.1.0 (github.com/tamnd/openfoodfacts-cli)",
 		Rate:      200 * time.Millisecond,
-		Retries:   5,
+		Timeout:   30 * time.Second,
+		Retries:   3,
 	}
 }
 
-// Get fetches url and returns the response body. It paces and retries according
-// to the client's settings. The caller owns nothing extra; the body is read
-// fully and closed here.
-func (c *Client) Get(ctx context.Context, url string) ([]byte, error) {
+// Client talks to Open Food Facts over HTTP.
+type Client struct {
+	cfg  Config
+	http *http.Client
+	mu   sync.Mutex
+	last time.Time
+}
+
+// NewClient returns a Client configured with cfg.
+func NewClient(cfg Config) *Client {
+	return &Client{
+		cfg:  cfg,
+		http: &http.Client{Timeout: cfg.Timeout},
+	}
+}
+
+// Product fetches the product with the given barcode.
+// Returns an error if the product is not found (status == 0).
+func (c *Client) Product(ctx context.Context, barcode string) (Product, error) {
+	fields := "product_name,brands,categories,ingredients_text,nutriments,ecoscore_grade,nutriscore_grade,code"
+	u := fmt.Sprintf(
+		"%s/api/v2/product/%s.json?fields=%s",
+		c.cfg.BaseURL, neturl.PathEscape(barcode), fields,
+	)
+	body, err := c.get(ctx, u)
+	if err != nil {
+		return Product{}, err
+	}
+	var resp wireProductResp
+	if err := json.Unmarshal(body, &resp); err != nil {
+		return Product{}, fmt.Errorf("decode product: %w", err)
+	}
+	if resp.Status == 0 {
+		return Product{}, fmt.Errorf("product not found: %s", barcode)
+	}
+	return toProduct(resp.Product), nil
+}
+
+// Search fetches products matching the given query string.
+// page is 1-based; pass 0 for page 1. limit defaults to 10 if <= 0.
+func (c *Client) Search(ctx context.Context, query string, limit, page int) ([]Product, error) {
+	n := limit
+	if n <= 0 {
+		n = 10
+	}
+	p := page
+	if p <= 0 {
+		p = 1
+	}
+	fields := "product_name,brands,categories,nutriscore_grade,ecoscore_grade,code"
+	u := fmt.Sprintf(
+		"%s/cgi/search.pl?search_terms=%s&search_simple=1&action=process&json=1&page_size=%d&page=%d&fields=%s",
+		c.cfg.BaseURL, neturl.QueryEscape(query), n, p, fields,
+	)
+	body, err := c.get(ctx, u)
+	if err != nil {
+		return nil, err
+	}
+	var resp wireSearchResp
+	if err := json.Unmarshal(body, &resp); err != nil {
+		return nil, fmt.Errorf("decode search: %w", err)
+	}
+	products := make([]Product, 0, len(resp.Products))
+	for _, r := range resp.Products {
+		products = append(products, toProduct(r))
+	}
+	return products, nil
+}
+
+// Category fetches products in the given category tag (e.g. "en:beverages").
+// limit defaults to 10 if <= 0.
+func (c *Client) Category(ctx context.Context, category string, limit int) ([]Product, error) {
+	n := limit
+	if n <= 0 {
+		n = 10
+	}
+	fields := "product_name,brands,categories,nutriscore_grade,code"
+	u := fmt.Sprintf(
+		"%s/api/v2/search?categories_tags=%s&page_size=%d&fields=%s",
+		c.cfg.BaseURL, neturl.QueryEscape(category), n, fields,
+	)
+	body, err := c.get(ctx, u)
+	if err != nil {
+		return nil, err
+	}
+	var resp wireSearchResp
+	if err := json.Unmarshal(body, &resp); err != nil {
+		return nil, fmt.Errorf("decode category search: %w", err)
+	}
+	products := make([]Product, 0, len(resp.Products))
+	for _, r := range resp.Products {
+		products = append(products, toProduct(r))
+	}
+	return products, nil
+}
+
+// Nutrients fetches nutritional information for the product with the given barcode.
+func (c *Client) Nutrients(ctx context.Context, barcode string) (Product, error) {
+	fields := "product_name,brands,nutriments,nutriscore_grade,ecoscore_grade,code"
+	u := fmt.Sprintf(
+		"%s/api/v2/product/%s.json?fields=%s",
+		c.cfg.BaseURL, neturl.PathEscape(barcode), fields,
+	)
+	body, err := c.get(ctx, u)
+	if err != nil {
+		return Product{}, err
+	}
+	var resp wireProductResp
+	if err := json.Unmarshal(body, &resp); err != nil {
+		return Product{}, fmt.Errorf("decode product: %w", err)
+	}
+	if resp.Status == 0 {
+		return Product{}, fmt.Errorf("product not found: %s", barcode)
+	}
+	return toProduct(resp.Product), nil
+}
+
+func toProduct(r wireProduct) Product {
+	n := r.Nutriments
+	nutrients := &Nutrients{
+		EnergyKcal: n.EnergyKcal,
+		Fat:        n.Fat,
+		SatFat:     n.SatFat,
+		Carbs:      n.Carbs,
+		Sugars:     n.Sugars,
+		Protein:    n.Proteins,
+		Salt:       n.Salt,
+		Fiber:      n.Fiber,
+	}
+	return Product{
+		Barcode:     r.Code,
+		Name:        r.ProductName,
+		Brands:      r.Brands,
+		Categories:  r.Categories,
+		Ingredients: r.IngredientsText,
+		NutriScore:  r.NutriscoreGrade,
+		EcoScore:    r.EcoscoreGrade,
+		Nutrients:   nutrients,
+	}
+}
+
+func (c *Client) get(ctx context.Context, url string) ([]byte, error) {
 	var lastErr error
-	for attempt := 0; attempt <= c.Retries; attempt++ {
+	for attempt := 0; attempt <= c.cfg.Retries; attempt++ {
 		if attempt > 0 {
 			select {
 			case <-ctx.Done():
@@ -76,125 +203,40 @@ func (c *Client) Get(ctx context.Context, url string) ([]byte, error) {
 	return nil, fmt.Errorf("get %s: %w", url, lastErr)
 }
 
-func (c *Client) do(ctx context.Context, url string) (body []byte, retry bool, err error) {
+func (c *Client) do(ctx context.Context, rawURL string) ([]byte, bool, error) {
 	c.pace()
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, rawURL, nil)
 	if err != nil {
 		return nil, false, err
 	}
-	req.Header.Set("User-Agent", c.UserAgent)
-
-	resp, err := c.HTTP.Do(req)
+	req.Header.Set("User-Agent", c.cfg.UserAgent)
+	resp, err := c.http.Do(req)
 	if err != nil {
 		return nil, true, err
 	}
 	defer func() { _ = resp.Body.Close() }()
-
 	if resp.StatusCode == http.StatusTooManyRequests || resp.StatusCode >= 500 {
 		return nil, true, fmt.Errorf("http %d", resp.StatusCode)
 	}
 	if resp.StatusCode != http.StatusOK {
 		return nil, false, fmt.Errorf("http %d", resp.StatusCode)
 	}
-
 	b, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return nil, true, err
-	}
-	return b, false, nil
+	return b, err != nil, err
 }
 
-// pace blocks until at least Rate has passed since the previous request.
 func (c *Client) pace() {
-	if c.Rate <= 0 {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.cfg.Rate <= 0 {
 		return
 	}
-	if wait := c.Rate - time.Since(c.last); wait > 0 {
+	if wait := c.cfg.Rate - time.Since(c.last); wait > 0 {
 		time.Sleep(wait)
 	}
 	c.last = time.Now()
 }
 
 func backoff(attempt int) time.Duration {
-	d := time.Duration(attempt) * 500 * time.Millisecond
-	if d > 5*time.Second {
-		d = 5 * time.Second
-	}
-	return d
-}
-
-// Page is the scaffold's one example record: a single page, addressed by the
-// path that names it on openfoodfacts.com. It is a stand-in for the typed records you
-// will model from the real openfoodfacts endpoints. The kit struct tags make it
-// addressable as a resource URI (see domain.go): ID is the URI id, and Body is
-// the long text `openfoodfacts cat` and the Markdown export print.
-type Page struct {
-	ID    string `json:"id" kit:"id"`
-	URL   string `json:"url"`
-	Title string `json:"title,omitempty"`
-	Body  string `json:"body,omitempty" kit:"body"`
-}
-
-// GetPage fetches one page by its path (for example "wiki/Go") and returns it as
-// a record. The scaffold keeps a plain-text preview of the response as the body;
-// replace the parsing with the real fields once you know the endpoint's shape.
-func (c *Client) GetPage(ctx context.Context, path string) (*Page, error) {
-	path = strings.Trim(path, "/")
-	url := BaseURL + "/" + path
-	body, err := c.Get(ctx, url)
-	if err != nil {
-		return nil, err
-	}
-	return &Page{ID: path, URL: url, Title: path, Body: pageText(body)}, nil
-}
-
-// PageLinks fetches a page and returns the same-host pages it links to, as page
-// stubs. It shows the member-listing pattern the URI driver relies on: every
-// stub carries enough (an id and a URL) to be addressed and followed on its own.
-func (c *Client) PageLinks(ctx context.Context, path string, limit int) ([]*Page, error) {
-	path = strings.Trim(path, "/")
-	body, err := c.Get(ctx, BaseURL+"/"+path)
-	if err != nil {
-		return nil, err
-	}
-	var out []*Page
-	seen := map[string]bool{}
-	for _, p := range linkPaths(body) {
-		if seen[p] {
-			continue
-		}
-		seen[p] = true
-		out = append(out, &Page{ID: p, URL: BaseURL + "/" + p})
-		if limit > 0 && len(out) >= limit {
-			break
-		}
-	}
-	return out, nil
-}
-
-var (
-	hrefRE = regexp.MustCompile(`href="(/[^":#?]+)"`)
-	tagRE  = regexp.MustCompile(`<[^>]+>`)
-)
-
-// linkPaths pulls the relative link targets out of an HTML response, so a list
-// op can turn each into an addressable page stub.
-func linkPaths(body []byte) []string {
-	var out []string
-	for _, m := range hrefRE.FindAllSubmatch(body, -1) {
-		if p := strings.Trim(string(m[1]), "/"); p != "" {
-			out = append(out, p)
-		}
-	}
-	return out
-}
-
-// pageText reduces an HTML response to a short plain-text preview, a stand-in
-// for the typed extract a real endpoint would hand you.
-func pageText(body []byte) string {
-	s := strings.Join(strings.Fields(tagRE.ReplaceAllString(string(body), " ")), " ")
-	if len(s) > 500 {
-		s = s[:500]
-	}
-	return s
+	return min(time.Duration(attempt)*500*time.Millisecond, 5*time.Second)
 }
