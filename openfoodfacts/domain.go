@@ -2,7 +2,7 @@ package openfoodfacts
 
 import (
 	"context"
-	"time"
+	"unicode"
 
 	"github.com/tamnd/any-cli/kit"
 	"github.com/tamnd/any-cli/kit/errs"
@@ -48,7 +48,7 @@ func (Domain) Register(app *kit.App) {
 		Group:   "read",
 		Single:  true,
 		Summary: "Fetch a food product by barcode (EAN-13 or UPC)",
-		Args:    []kit.Arg{{Name: "barcode", Help: "barcode string (e.g. 3017620422003)"}},
+		Args:    []kit.Arg{{Name: "barcode", Help: "product barcode (EAN-13, UPC-A, etc.)"}},
 	}, productOp)
 
 	// search: full-text search for food products
@@ -59,24 +59,6 @@ func (Domain) Register(app *kit.App) {
 		Summary: "Search for food products by name",
 		Args:    []kit.Arg{{Name: "query", Help: "search query"}},
 	}, searchOp)
-
-	// category: browse products in a category
-	kit.Handle(app, kit.OpMeta{
-		Name:    "category",
-		Group:   "read",
-		List:    true,
-		Summary: "List products in a category (e.g. en:beverages)",
-		Args:    []kit.Arg{{Name: "name", Help: "category tag (e.g. en:beverages)"}},
-	}, categoryOp)
-
-	// nutrients: nutritional info for a product by barcode
-	kit.Handle(app, kit.OpMeta{
-		Name:    "nutrients",
-		Group:   "read",
-		Single:  true,
-		Summary: "Fetch nutritional information for a product by barcode",
-		Args:    []kit.Arg{{Name: "barcode", Help: "barcode string (e.g. 3017620422003)"}},
-	}, nutrientsOp)
 }
 
 // newClient builds the client from host-resolved config.
@@ -100,40 +82,24 @@ func newClient(_ context.Context, cfg kit.Config) (any, error) {
 // --- inputs ---
 
 type productInput struct {
-	Barcode string        `kit:"arg" help:"barcode string (e.g. 3017620422003)"`
-	Delay   time.Duration `kit:"flag,inherit" help:"minimum spacing between requests"`
-	Client  *Client       `kit:"inject"`
+	Barcode string  `kit:"arg" help:"product barcode (EAN-13, UPC-A, etc.)"`
+	Client  *Client `kit:"inject"`
 }
 
 type searchInput struct {
-	Query  string        `kit:"arg" help:"search query"`
-	Limit  int           `kit:"flag,inherit" help:"max results"`
-	Page   int           `kit:"flag" help:"page number (1-based)"`
-	Delay  time.Duration `kit:"flag,inherit" help:"minimum spacing between requests"`
-	Client *Client       `kit:"inject"`
-}
-
-type categoryInput struct {
-	Name   string        `kit:"arg" help:"category tag (e.g. en:beverages)"`
-	Limit  int           `kit:"flag,inherit" help:"max results"`
-	Delay  time.Duration `kit:"flag,inherit" help:"minimum spacing between requests"`
-	Client *Client       `kit:"inject"`
-}
-
-type nutrientsInput struct {
-	Barcode string        `kit:"arg" help:"barcode string (e.g. 3017620422003)"`
-	Delay   time.Duration `kit:"flag,inherit" help:"minimum spacing between requests"`
-	Client  *Client       `kit:"inject"`
+	Query  string  `kit:"arg" help:"search query"`
+	Limit  int     `kit:"flag,inherit" help:"max results" default:"10"`
+	Client *Client `kit:"inject"`
 }
 
 // --- handlers ---
 
 func productOp(ctx context.Context, in productInput, emit func(Product) error) error {
-	p, err := in.Client.Product(ctx, in.Barcode)
+	p, err := in.Client.GetProduct(ctx, in.Barcode)
 	if err != nil {
-		return mapErr(err)
+		return err
 	}
-	return emit(p)
+	return emit(*p)
 }
 
 func searchOp(ctx context.Context, in searchInput, emit func(Product) error) error {
@@ -141,9 +107,9 @@ func searchOp(ctx context.Context, in searchInput, emit func(Product) error) err
 	if limit <= 0 {
 		limit = 10
 	}
-	products, err := in.Client.Search(ctx, in.Query, limit, in.Page)
+	products, err := in.Client.Search(ctx, in.Query, limit)
 	if err != nil {
-		return mapErr(err)
+		return err
 	}
 	for _, p := range products {
 		if err := emit(p); err != nil {
@@ -151,41 +117,33 @@ func searchOp(ctx context.Context, in searchInput, emit func(Product) error) err
 		}
 	}
 	return nil
-}
-
-func categoryOp(ctx context.Context, in categoryInput, emit func(Product) error) error {
-	limit := in.Limit
-	if limit <= 0 {
-		limit = 10
-	}
-	products, err := in.Client.Category(ctx, in.Name, limit)
-	if err != nil {
-		return mapErr(err)
-	}
-	for _, p := range products {
-		if err := emit(p); err != nil {
-			return err
-		}
-	}
-	return nil
-}
-
-func nutrientsOp(ctx context.Context, in nutrientsInput, emit func(Product) error) error {
-	p, err := in.Client.Nutrients(ctx, in.Barcode)
-	if err != nil {
-		return mapErr(err)
-	}
-	return emit(p)
 }
 
 // --- Resolver ---
 
+// isBarcode returns true if s is 8 or more digit characters (EAN-8, EAN-13, UPC-A, etc.).
+func isBarcode(s string) bool {
+	if len(s) < 8 {
+		return false
+	}
+	for _, r := range s {
+		if !unicode.IsDigit(r) {
+			return false
+		}
+	}
+	return true
+}
+
 // Classify turns an input into the canonical (type, id).
+// 8+ digit strings are treated as barcodes ("product"), everything else as a search query ("query").
 func (Domain) Classify(input string) (uriType, id string, err error) {
 	if input == "" {
 		return "", "", errs.Usage("empty openfoodfacts reference")
 	}
-	return "product", input, nil
+	if isBarcode(input) {
+		return "product", input, nil
+	}
+	return "query", input, nil
 }
 
 // Locate returns the live https URL for a (type, id).
@@ -193,12 +151,9 @@ func (Domain) Locate(uriType, id string) (string, error) {
 	switch uriType {
 	case "product":
 		return "https://world.openfoodfacts.org/product/" + id, nil
+	case "query":
+		return "https://world.openfoodfacts.org/cgi/search.pl?search_terms=" + id + "&action=process", nil
 	default:
 		return "", errs.Usage("openfoodfacts has no resource type %q", uriType)
 	}
-}
-
-// mapErr converts a library error into the kit error kind.
-func mapErr(err error) error {
-	return err
 }

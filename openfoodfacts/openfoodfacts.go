@@ -3,7 +3,7 @@
 // Food Facts API (world.openfoodfacts.org).
 //
 // No authentication is required. The client sets a descriptive User-Agent and
-// paces requests at 200ms minimum to be polite to the free community service.
+// paces requests at 300ms minimum to be polite to the free community service.
 package openfoodfacts
 
 import (
@@ -34,7 +34,7 @@ func DefaultConfig() Config {
 	return Config{
 		BaseURL:   "https://world.openfoodfacts.org",
 		UserAgent: "openfoodfacts-cli/0.1.0 (github.com/tamnd/openfoodfacts-cli)",
-		Rate:      200 * time.Millisecond,
+		Rate:      300 * time.Millisecond,
 		Timeout:   30 * time.Second,
 		Retries:   3,
 	}
@@ -56,49 +56,78 @@ func NewClient(cfg Config) *Client {
 	}
 }
 
-// Product fetches the product with the given barcode.
-// Returns an error if the product is not found (status == 0).
-func (c *Client) Product(ctx context.Context, barcode string) (Product, error) {
-	fields := "product_name,brands,categories,ingredients_text,nutriments,ecoscore_grade,nutriscore_grade,code"
-	u := fmt.Sprintf(
-		"%s/api/v2/product/%s.json?fields=%s",
-		c.cfg.BaseURL, neturl.PathEscape(barcode), fields,
-	)
-	body, err := c.get(ctx, u)
-	if err != nil {
-		return Product{}, err
-	}
-	var resp wireProductResp
-	if err := json.Unmarshal(body, &resp); err != nil {
-		return Product{}, fmt.Errorf("decode product: %w", err)
-	}
-	if resp.Status == 0 {
-		return Product{}, fmt.Errorf("product not found: %s", barcode)
-	}
-	return toProduct(resp.Product), nil
+// wire types for JSON decode only
+
+type productResponse struct {
+	Status  int         `json:"status"` // 1=found, 0=not found
+	Code    string      `json:"code"`
+	Product wireProduct `json:"product"`
 }
 
-// Search fetches products matching the given query string.
-// page is 1-based; pass 0 for page 1. limit defaults to 10 if <= 0.
-func (c *Client) Search(ctx context.Context, query string, limit, page int) ([]Product, error) {
-	n := limit
-	if n <= 0 {
-		n = 10
-	}
-	p := page
-	if p <= 0 {
-		p = 1
-	}
-	fields := "product_name,brands,categories,nutriscore_grade,ecoscore_grade,code"
+type searchResponse struct {
+	Count    int           `json:"count"`
+	Products []wireProduct `json:"products"`
+}
+
+type wireProduct struct {
+	Code            string         `json:"code"`
+	ProductName     string         `json:"product_name"`
+	Brands          string         `json:"brands"`
+	Categories      string         `json:"categories"`
+	ImageURL        string         `json:"image_url"`
+	NutriscoreGrade string         `json:"nutriscore_grade"`
+	NovaGroup       int            `json:"nova_group"`
+	Nutriments      wireNutriments `json:"nutriments"`
+}
+
+type wireNutriments struct {
+	EnergyKcal100g    float64 `json:"energy-kcal_100g"`
+	Fat100g           float64 `json:"fat_100g"`
+	Carbohydrates100g float64 `json:"carbohydrates_100g"`
+	Proteins100g      float64 `json:"proteins_100g"`
+	Salt100g          float64 `json:"salt_100g"`
+	Sugars100g        float64 `json:"sugars_100g"`
+}
+
+// GetProduct fetches the product with the given barcode.
+// Returns an error if the product is not found (status == 0).
+func (c *Client) GetProduct(ctx context.Context, barcode string) (*Product, error) {
 	u := fmt.Sprintf(
-		"%s/cgi/search.pl?search_terms=%s&search_simple=1&action=process&json=1&page_size=%d&page=%d&fields=%s",
-		c.cfg.BaseURL, neturl.QueryEscape(query), n, p, fields,
+		"%s/api/v2/product/%s.json",
+		c.cfg.BaseURL, neturl.PathEscape(barcode),
 	)
 	body, err := c.get(ctx, u)
 	if err != nil {
 		return nil, err
 	}
-	var resp wireSearchResp
+	var resp productResponse
+	if err := json.Unmarshal(body, &resp); err != nil {
+		return nil, fmt.Errorf("decode product: %w", err)
+	}
+	if resp.Status == 0 {
+		return nil, fmt.Errorf("product not found: %s", barcode)
+	}
+	p := toProduct(resp.Product)
+	return &p, nil
+}
+
+// Search fetches products matching the given query string.
+// limit defaults to 10 if <= 0.
+func (c *Client) Search(ctx context.Context, query string, limit int) ([]Product, error) {
+	n := limit
+	if n <= 0 {
+		n = 10
+	}
+	fields := "product_name,brands,categories,code,image_url,nutriscore_grade,nova_group,nutriments"
+	u := fmt.Sprintf(
+		"%s/cgi/search.pl?search_terms=%s&action=process&json=1&page_size=%d&fields=%s",
+		c.cfg.BaseURL, neturl.QueryEscape(query), n, fields,
+	)
+	body, err := c.get(ctx, u)
+	if err != nil {
+		return nil, err
+	}
+	var resp searchResponse
 	if err := json.Unmarshal(body, &resp); err != nil {
 		return nil, fmt.Errorf("decode search: %w", err)
 	}
@@ -109,75 +138,24 @@ func (c *Client) Search(ctx context.Context, query string, limit, page int) ([]P
 	return products, nil
 }
 
-// Category fetches products in the given category tag (e.g. "en:beverages").
-// limit defaults to 10 if <= 0.
-func (c *Client) Category(ctx context.Context, category string, limit int) ([]Product, error) {
-	n := limit
-	if n <= 0 {
-		n = 10
-	}
-	fields := "product_name,brands,categories,nutriscore_grade,code"
-	u := fmt.Sprintf(
-		"%s/api/v2/search?categories_tags=%s&page_size=%d&fields=%s",
-		c.cfg.BaseURL, neturl.QueryEscape(category), n, fields,
-	)
-	body, err := c.get(ctx, u)
-	if err != nil {
-		return nil, err
-	}
-	var resp wireSearchResp
-	if err := json.Unmarshal(body, &resp); err != nil {
-		return nil, fmt.Errorf("decode category search: %w", err)
-	}
-	products := make([]Product, 0, len(resp.Products))
-	for _, r := range resp.Products {
-		products = append(products, toProduct(r))
-	}
-	return products, nil
-}
-
-// Nutrients fetches nutritional information for the product with the given barcode.
-func (c *Client) Nutrients(ctx context.Context, barcode string) (Product, error) {
-	fields := "product_name,brands,nutriments,nutriscore_grade,ecoscore_grade,code"
-	u := fmt.Sprintf(
-		"%s/api/v2/product/%s.json?fields=%s",
-		c.cfg.BaseURL, neturl.PathEscape(barcode), fields,
-	)
-	body, err := c.get(ctx, u)
-	if err != nil {
-		return Product{}, err
-	}
-	var resp wireProductResp
-	if err := json.Unmarshal(body, &resp); err != nil {
-		return Product{}, fmt.Errorf("decode product: %w", err)
-	}
-	if resp.Status == 0 {
-		return Product{}, fmt.Errorf("product not found: %s", barcode)
-	}
-	return toProduct(resp.Product), nil
-}
-
 func toProduct(r wireProduct) Product {
 	n := r.Nutriments
-	nutrients := &Nutrients{
-		EnergyKcal: n.EnergyKcal,
-		Fat:        n.Fat,
-		SatFat:     n.SatFat,
-		Carbs:      n.Carbs,
-		Sugars:     n.Sugars,
-		Protein:    n.Proteins,
-		Salt:       n.Salt,
-		Fiber:      n.Fiber,
-	}
 	return Product{
-		Barcode:     r.Code,
-		Name:        r.ProductName,
-		Brands:      r.Brands,
-		Categories:  r.Categories,
-		Ingredients: r.IngredientsText,
-		NutriScore:  r.NutriscoreGrade,
-		EcoScore:    r.EcoscoreGrade,
-		Nutrients:   nutrients,
+		Barcode:    r.Code,
+		Name:       r.ProductName,
+		Brands:     r.Brands,
+		Categories: r.Categories,
+		ImageURL:   r.ImageURL,
+		NutriScore: r.NutriscoreGrade,
+		NovaGroup:  r.NovaGroup,
+		Nutriments: Nutriments{
+			EnergyKcal100g:    n.EnergyKcal100g,
+			Fat100g:           n.Fat100g,
+			Carbohydrates100g: n.Carbohydrates100g,
+			Proteins100g:      n.Proteins100g,
+			Salt100g:          n.Salt100g,
+			Sugars100g:        n.Sugars100g,
+		},
 	}
 }
 
